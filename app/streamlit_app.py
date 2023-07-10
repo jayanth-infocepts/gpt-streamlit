@@ -1,279 +1,158 @@
-import streamlit as st  # pip install streamlit
-import streamlit_authenticator as stauth  # pip install streamlit-authenticator==0.1.5
-from streamlit_extras.add_vertical_space import add_vertical_space
-import os
-import string
-import random
+import altair as alt
 import pandas as pd
-from datetime import datetime
-from langchain.chains import RetrievalQA
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.llms import GPT4All
-from langchain.vectorstores import Chroma
-from langchain import PromptTemplate, LLMChain
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-import time
-os.chdir(r"C:\Users\pp_info1\Downloads\streamlit_llm")
-import database as db
-from data_preparation import *
+import streamlit as st
+from vega_datasets import data
 
-from langchain.chains.question_answering import load_qa_chain
-from langchain.docstore.document import Document
-
-def save_uploadedfile(uploadedfile):
-     with open(os.path.join("uploadedfiles",uploadedfile.name),"wb") as f:
-         f.write(uploadedfile.getbuffer())
-         print("Uploaded Files:{}".format(uploadedfile.name))
-     return st.success("Uploaded Files:{}".format(uploadedfile.name))
-
-# emojis: https://www.webfx.com/tools/emoji-cheat-sheet/
-st.set_page_config(page_title="InfoCepts LLM", page_icon=":scroll:", layout="wide")
-
-# --- USER AUTHENTICATION ---
-import psycopg2
-#establishing the connection
-conn = psycopg2.connect(
-   database="postgres", user='postgres', password='postgres', host='127.0.0.1', port= '5432'
+st.set_page_config(
+    page_title="Time series annotations", page_icon="⬇", layout="centered"
 )
-#Setting auto commit false
-conn.autocommit = True
-#Creating a cursor object using the cursor() method
-cursor = conn.cursor()
-#Retrieving data
-cursor.execute('''SELECT * from llm_login''')
-#Fetching 1st row from the table
-users = cursor.fetchall();
-#Commit your changes in the database
-conn.commit()
-#Closing the connection
-conn.close()
 
-usernames = [user[0] for user in users]
-names = [user[1] for user in users]
-hashed_passwords = [user[2] for user in users]
-authenticator = stauth.Authenticate(names, usernames, hashed_passwords,
-    "InfoCepts LLM", "llm", cookie_expiry_days=30)
 
-name, authentication_status, username = authenticator.login("Login", "main")
+@st.experimental_memo
+def get_data():
+    source = data.stocks()
+    source = source[source.date.gt("2004-01-01")]
+    return source
 
-if authentication_status == False:
-    st.error("Username/password is incorrect")
 
-if authentication_status == None:
-    st.warning("Please enter your username and password")
+@st.experimental_memo(ttl=60 * 60 * 24)
+def get_chart(data):
+    hover = alt.selection_single(
+        fields=["date"],
+        nearest=True,
+        on="mouseover",
+        empty="none",
+    )
 
-if authentication_status == True:
-    # ---- SIDEBAR ----
-    authenticator.logout("Logout", "sidebar")
-    st.sidebar.title(f"Welcome {name}")
-    #datetime_str = str(datetime.now())
-    #insert_user_activity(username,name,datetime_str,"gpt4all_nzoozy")
-    
-    #add_vertical_space(5)
-    import streamlit as st
-    from streamlit_option_menu import option_menu
+    lines = (
+        alt.Chart(data, title="Evolution of stock prices")
+        .mark_line()
+        .encode(
+            x="date",
+            y="price",
+            color="symbol",
+            # strokeDash="symbol",
+        )
+    )
 
-    with st.sidebar:
-        #selected = option_menu("Menu", ["Inputs", 'Model Parameters', 'Ask your LLM'], 
-        #    icons=['house', 'gear', 'question'], default_index=0)
-        
-        selected = option_menu(None, ["Home", "Inputs", "Model Parameters", 'Ask your LLM', 'Show my Data'], 
-        icons=['house', 'plus-circle','gear' ,"pencil-square", "database"], 
-        menu_icon="cast", default_index=0, orientation="Vertical")
+    # Draw points on the line, and highlight based on selection
+    points = lines.transform_filter(hover).mark_circle(size=65)
 
-    if selected == "Home":
-        st.title("About")
-        st.write("Placeholder")
+    # Draw a rule at the location of the selection
+    tooltips = (
+        alt.Chart(data)
+        .mark_rule()
+        .encode(
+            x="yearmonthdate(date)",
+            y="price",
+            opacity=alt.condition(hover, alt.value(0.3), alt.value(0)),
+            tooltip=[
+                alt.Tooltip("date", title="Date"),
+                alt.Tooltip("price", title="Price (USD)"),
+            ],
+        )
+        .add_selection(hover)
+    )
 
-    elif selected == "Inputs":
-        
-        #st.session_state['df_inputs'] = pd.DataFrame(columns=["option_model","option_embedd","path_input"])
-        
-        if "df_inputs" not in st.session_state:
-            st.session_state['df_inputs'] = pd.DataFrame(columns=["option_model","option_embedd","path_input"])
-        st.title("Inputs")
-        file = st.file_uploader("Upload your Files")
-        if file is not None:
-            st.success("Uploaded Files:{}".format(file.name))
-        with st.form("my_form"):
-            #st.title("Inputs")
-            models = [*list(os.listdir(r"C:\Users\pp_info1\Downloads\streamlit_llm\Models"))]
-            embedd=   ['sentence-transformers/all-MiniLM-L6-v2']
-            option_model = st.selectbox('Choose your model',models)
-            
-            #st.write('You selected:', option_model)
-            
-            option_embedd = st.selectbox('Choose your embeddings transformer',embedd)
-            
-            #st.write('You selected:', option_embedd)
-            
-            path_input = r'C:\Users\pp_info1\Downloads\streamlit_llm\uploadedfiles'
-            #path_input = st.text_input('Please enter the file path',r'C:\Users\pp_info1\Downloads\streamlit_llm\uploadedfiles')
-            #uploaded_files = st.file_uploader("Choose a PDF(s) to feed the model", accept_multiple_files=True)
-            def onTrainModel():
-                
-                st.session_state['df_inputs'] = pd.DataFrame(columns=["option_model","option_embedd","path_input"])
-            
-                data = {
-                'option_model':[option_model],
-                'option_embedd': [option_embedd],
-                'path_input':[path_input],
-                }
-                
-                if path_input == '' or option_model == '' or option_embedd == '':
-                    st.write("All Inputs should be provided..")
-                else:
-                    st.session_state['df_inputs'] = pd.concat([st.session_state['df_inputs'],pd.DataFrame(data)])
-                    st.session_state['df_inputs'] = st.session_state['df_inputs'].drop_duplicates()
-                    st.session_state['files'] = file
-                
-                progress_text = "Model Training in progress. Please wait."
-                my_bar = st.progress(0, text=progress_text)
-                if file is not None:
-                    print("file uploading")
-                    save_uploadedfile(file)
-                    print("file uploaded")
-                # Embeddings
-                embeddings = HuggingFaceEmbeddings(model_name=option_embedd)
-                for percent_complete in range(50):
-                    time.sleep(0.1)
-                    my_bar.progress(percent_complete + 1, text=progress_text)
-                # Create and store locally vectorstore
-                print("Creating new vectorstore...")
-                texts = process_documents(source_directory = path_input, chunk_size = 1024, chunk_overlap = 64)
-                print("Creating embeddings. May take some minutes...")
-                store = Chroma.from_documents(texts, embeddings)
-                print("Embeddings created successfully")
-                st.session_state['store'] = store
-                #progress_text = "Model Training in progress. Please wait."
-                #my_bar = st.progress(0, text=progress_text)
-                df_input = st.session_state['df_inputs']
-                option_model1 = df_input['option_model'][0]
-                option_model1 = os.path.join(os.getcwd(), "Models",option_model1)
-                # Callbacks support token-wise streaming
-                callbacks = [StreamingStdOutCallbackHandler()]
-                
-                print("Loading Model")
-                #llm = GPT4All(model=model, backend="gptj", callbacks=callbacks, verbose=False, n_ctx=2048)
-                llm = GPT4All(model=option_model1, n_ctx=2048, backend='gptj', n_batch=8, callbacks=callbacks, verbose=True, temp = 0.7, n_predict = 4096, top_p = 0.1, top_k = 40, repeat_penalty = 1.18)
+    return (lines + points + tooltips).interactive()
 
-                
-                print("Model Loaded")
-                st.session_state['llm'] = llm
-                for percent_complete in range(50,100):
-                    time.sleep(0.1)
-                    my_bar.progress(percent_complete + 1, text=progress_text)
-                st.write("Training Complete!")
-            
-            st.form_submit_button("Finetune Model", on_click = onTrainModel)   
 
-        
-    elif selected == "Model Parameters":
-        st.title("Model Parameters")
-        st.write("Placeholder")
-        #if "df_inputs" not in st.session_state:
-        #    st.session_state['df_inputs'] = pd.DataFrame(columns=["option_model","option_embedd","path_input"])
+st.title("⬇ Time series annotations")
 
-        
-    elif selected == "Ask your LLM":
-        st.title("Ask you LLM")
-        #st.write(st.session_state['df_inputs'].drop_duplicates())
-        
-        
-        method = st.radio("Select a Method", ('RAG', 'RetrievalQA'), horizontal = True)
-        question_input = st.text_input('Please enter your question here')
-        
+st.write("Give more context to your time series using annotations!")
 
-        def getresponse_rqa(model, store, question, method, llm):
-            
-            qa = RetrievalQA.from_chain_type(
-                    llm=llm,
-                    chain_type="stuff",
-                    retriever=store.as_retriever(search_kwargs={"k": 2}),
-                    return_source_documents=True,
-                    verbose=False,
-                )
-            
-            
-            start = time.time()
-            response = qa(question)
-            answer, docs = response['result'], response['source_documents']
-            end = time.time()
-    
-            # Print the result
-            st.write("Question:")
-            st.write(response['query'])
-            st.write("Answer:")
-            st.write(answer)
-            st.write("Method:")
-            st.write(method)
-            st.write(f"\n> Answer (took {round(end - start, 2)} s.):")
-            # Print the relevant sources used for the answer
-            for document in docs:
-                st.write("\n> " + document.metadata["source"] + ":")
-                st.write(document.page_content)
+col1, col2, col3 = st.columns(3)
+with col1:
+    ticker = st.text_input("Choose a ticker (⬇💬👇ℹ️ ...)", value="⬇")
+with col2:
+    ticker_dx = st.slider(
+        "Horizontal offset", min_value=-30, max_value=30, step=1, value=0
+    )
+with col3:
+    ticker_dy = st.slider(
+        "Vertical offset", min_value=-30, max_value=30, step=1, value=-10
+    )
 
-            datetime_str = str(datetime.now())
-            count = ''.join(random.choices(string.ascii_uppercase +
-                                          string.digits, k=7))
-            db.insert_user_activity(str(count),username,name,datetime_str,model, method,response['query'], response['result'])
+# Original time series chart. Omitted `get_chart` for clarity
+source = get_data()
+chart = get_chart(source)
 
-        
-        def getresponse_rag(model, store, question, method, llm):
-            docs = store.similarity_search(question,k=2)
-                        
-            #prompt_template = """Answer based on context:\n\n{context}\n\n{question}"""
-            #PROMPT = PromptTemplate(template=prompt_template, input_variables=[ "context","question"]) 
-            #chain = load_qa_chain(llm=llm, prompt=PROMPT)
-            #result = chain({"input_documents": docs, "question": question}, return_only_outputs=True)["output_text"]
-            chain = load_qa_chain(llm=llm, chain_type="stuff")
-            
-            start = time.time()
-            result = chain.run(input_documents=docs, question=question)
-            end = time.time()
-            
-            
-            datetime_str = str(datetime.now())
-            count = ''.join(random.choices(string.ascii_uppercase +
-                                         string.digits, k=7))
-            db.insert_user_activity(str(count),username,name,datetime_str,model, method,question, result)
+# Input annotations
+ANNOTATIONS = [
+    ("Mar 01, 2008", "Pretty good day for GOOG"),
+    ("Dec 01, 2007", "Something's going wrong for GOOG & AAPL"),
+    ("Nov 01, 2008", "Market starts again thanks to..."),
+    ("Dec 01, 2009", "Small crash for GOOG after..."),
+]
 
-            
-            st.write("Question:")
-            st.write(question)
-            st.write("Answer:")
-            st.write(result)
-            st.write("Method:")
-            st.write(method)
-            st.write(f"\n> Answer (took {round(end - start, 2)} s.):")
+# Create a chart with annotations
+annotations_df = pd.DataFrame(ANNOTATIONS, columns=["date", "event"])
+annotations_df.date = pd.to_datetime(annotations_df.date)
+annotations_df["y"] = 0
+annotation_layer = (
+    alt.Chart(annotations_df)
+    .mark_text(size=15, text=ticker, dx=ticker_dx, dy=ticker_dy, align="center")
+    .encode(
+        x="date:T",
+        y=alt.Y("y:Q"),
+        tooltip=["event"],
+    )
+    .interactive()
+)
 
-        if question_input:
-            df_input = st.session_state['df_inputs']
-            option_model = df_input['option_model'][0]
-            option_model = os.path.join(os.getcwd(), "Models",option_model)
-            #option_embedd = df_input['option_embedd'][0]
-            #path_input = df_input['path_input'][0]
-            store = st.session_state['store']
-            llm = st.session_state['llm']
-            if question_input=='':# or path_input=='':
-                st.write('The question prompt/path is empty')
-            else:
-                print("Generating Answer....")
-                
-                if method == 'RetrievalQA':
-                    getresponse_rqa(model = option_model,store=store, question = question_input, method=method, llm=llm)  
-                elif method == 'RAG':
-                    getresponse_rag(model = option_model,store=store, question = question_input, method=method, llm=llm)
-                print("\nAnswer provided..")
-    
-    elif selected == 'Show my Data':
-         st.title('My Data')
-         data = db.fetch_user_activity()
-         ans = pd.DataFrame.from_dict(data)
-         ans.columns = ['key','username','name','datetime','model','method','prompt','result']
-         ans = ans[ans['name']==name]
-         ans = ans[['key','username','name','datetime','model','method','prompt','result']]
-         st.write(ans[['key','username','name','datetime','model','method','prompt','result']])
-        
-        
+# Display both charts together
+st.altair_chart((chart + annotation_layer).interactive(), use_container_width=True)
 
+st.write("## Code")
+
+st.write(
+    "See more in our public [GitHub repository](https://github.com/streamlit/example-app-time-series-annotation)"
+)
+
+st.code(
+    f"""
+import altair as alt
+import pandas as pd
+import streamlit as st
+from vega_datasets import data
+
+@st.experimental_memo
+def get_data():
+    source = data.stocks()
+    source = source[source.date.gt("2004-01-01")]
+    return source
+
+source = get_data()
+
+# Original time series chart. Omitted `get_chart` for clarity
+chart = get_chart(source)
+
+# Input annotations
+ANNOTATIONS = [
+    ("Mar 01, 2008", "Pretty good day for GOOG"),
+    ("Dec 01, 2007", "Something's going wrong for GOOG & AAPL"),
+    ("Nov 01, 2008", "Market starts again thanks to..."),
+    ("Dec 01, 2009", "Small crash for GOOG after..."),
+]
+
+# Create a chart with annotations
+annotations_df = pd.DataFrame(ANNOTATIONS, columns=["date", "event"])
+annotations_df.date = pd.to_datetime(annotations_df.date)
+annotations_df["y"] = 0
+annotation_layer = (
+    alt.Chart(annotations_df)
+    .mark_text(size=15, text="{ticker}", dx={ticker_dx}, dy={ticker_dy}, align="center")
+    .encode(
+        x="date:T",
+        y=alt.Y("y:Q"),
+        tooltip=["event"],
+    )
+    .interactive()
+)
+
+# Display both charts together
+st.altair_chart((chart + annotation_layer).interactive(), use_container_width=True)
+
+""",
+    "python",
+)
